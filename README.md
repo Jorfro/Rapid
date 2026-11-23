@@ -29,7 +29,7 @@ CSV-filen är UTF-8 med BOM, semikolon och CRLF, så den öppnas med rätt tecke
 
 ## Bygga
 
-`dist/RapidTillCsv.exe` kräver bara .NET Framework 4.5 eller senare, som redan finns i Windows 10 och 11.
+`dist/RapidTillCsv.exe` kräver bara .NET Framework 4.5 eller senare, som redan finns i Windows 10 och 11. Koden får därför bara använda API:er som finns i .NET Framework, t.ex. `TrimEnd(null)` och inte `TrimEnd()` utan argument.
 
 Bygga själv med .NET SDK:
 
@@ -52,9 +52,9 @@ Det finns ingen publicerad beskrivning. Detta är utrett från filerna här:
 | `0x08` | u8 | antal fält |
 
 - **Fältdefinition:** u16 längd, sedan fyra längdprefixade delar: formel som text, kompilerad formel, namn (13 tecken, utfyllt med blanksteg) och attribut (typ, fältnummer, bredd …). Typerna är `A` (text), `N` (tal), `a` och `0` (beräknade fält). Beräknade värden är sparade i posterna.
-- Därefter följer vyer, rapporter, formulär och sorteringsordningar.
-- **Posterna** ligger sist i filen och går ända till filslutet. Varje post är en u16 längd (inklusive de två längdbytena), följd av ett `[u8 längd][text]` per fält i fältnummerordning. Allt är text, även talfält (därför kan ett talfält innehålla t.ex. `933B`).
-- Det finns ingen pekare till postområdet. Programmet letar upp den position där exakt *antal poster* poster med *antal fält* fält vardera går jämnt ut mot filslutet.
+- Resten av filen är en **kedja av block**, vart och ett med u16 längd (inklusive de två längdbytena). Först kommer vyer, rapporter, formulär och sorteringsordningar, och sist posterna. Kedjan går ända till filslut, så posterna är de sista *antal poster* blocken.
+- **Post:** ett `[u8 längd][text]` per fält i fältnummerordning. Allt är text, även talfält (därför kan ett talfält innehålla t.ex. `933B`). Nyare filer (byte `0x0A`–`0x0B` = `0D 02`, t.ex. Norhalla och Sydhalla) utelämnar tomma fält i slutet av posten.
+- Antal poster lagras i 16 bitar. Har en fil fler än 65 535 poster märks det som fler postliknande block i slutet, och då räknas de med.
 - **Teckentabell:** DOS 850. Å/Ä/Ö är `8F/8E/99` och å/ä/ö `86/84/94`. Tabell 850 behövs i stället för 437 eftersom `EF` används som apostrof (´).
 
 ## Kontroll

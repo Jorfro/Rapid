@@ -10,14 +10,19 @@
 //   --tab          tabb som avgränsare i CSV
 //   --ingen-xlsx   skriv bara CSV
 //
-// RPD-formatet (RapidFile 1.x, magic E3 92 87 45), utrett från filerna:
+// Kompileras mot .NET Framework 4.5: använd bara API:er som finns där
+// (t.ex. TrimEnd(null), inte TrimEnd() utan argument).
+//
+// RPD-formatet (RapidFile, magic E3 92 87 45), utrett från filerna:
 //   0x04 u16  storlek på filhuvudet; fältdefinitionerna börjar på värdet + 4
 //   0x06 u16  antal poster
 //   0x08 u8   antal fält
 //   Fältdefinition: u16 längd, [u8 n, formeltext], [u8 n, kompilerad formel],
 //                   [u8 n, namn], [u8 n, attribut: typ, fältnummer, bredd, ...]
-//   Därefter vyer, rapporter och formulär, och sist alla poster till filslut:
-//   Post: u16 längd (inklusive de två längdbytena), sedan ett [u8 n, text] per fält.
+//   Resten av filen är en kedja av block, var och ett med u16 längd (inklusive
+//   de två längdbytena): först vyer, rapporter och formulär, sist posterna.
+//   Post: ett [u8 n, text] per fält. Nyare filer (0x0A = 0D 02) utelämnar
+//   tomma fält i slutet av posten.
 
 using System;
 using System.Collections.Generic;
@@ -102,30 +107,32 @@ namespace RapidTillCsv
                 p += len;
             }
 
-            // Posterna ligger sist i filen. Leta upp starten: den position där exakt
-            // nrec poster med nf fält vardera går jämnt ut mot filslutet.
+            // Allt efter fältdefinitionerna är en kedja av block med u16-längd:
+            // först vyer, rapporter och formulär, sist posterna. Posterna är
+            // alltså de sista blocken i kedjan.
+            var blocks = new List<int>();
+            int pos = p;
+            while (pos + 2 <= d.Length)
+            {
+                int len = U16(d, pos);
+                if (len < 2 || pos + len > d.Length) break;
+                blocks.Add(pos);
+                pos += len;
+            }
+            if (pos != d.Length)
+                throw new InvalidDataException("okänd filstruktur vid position 0x" + pos.ToString("X") +
+                                               " (blockkedjan går inte ända till filslut)");
+
+            // Antalet poster lagras i 16 bitar. Har filen fler än 65 535 poster
+            // syns det som fler postliknande block i slutet av kedjan.
+            int tail = 0;
+            for (int i = blocks.Count - 1; i >= 0 && FieldCount(d, blocks[i], nf) >= 0; i--) tail++;
+            int count = nrec;
+            while (count + 65536 <= tail) count += 65536;
+            if (count > tail)
+                throw new InvalidDataException("filhuvudet säger " + count + " poster men bara " + tail + " hittades");
+
             var t = new Table();
-            int start = -1, fallback = -1, fallbackCount = 0;
-            if (nrec == 0)
-            {
-                start = d.Length;
-            }
-            else
-            {
-                for (int s = p; s < d.Length; s++)
-                {
-                    if (!LooksLikeRecords(d, s, nf, Math.Min(5, nrec))) continue;
-                    int n = CountToEnd(d, s, nf);
-                    if (n == nrec) { start = s; break; }
-                    if (n > 0 && fallback < 0) { fallback = s; fallbackCount = n; }
-                }
-                if (start < 0 && fallback >= 0)
-                {
-                    start = fallback;
-                    t.Warnings.Add("filhuvudet säger " + nrec + " poster men " + fallbackCount + " hittades");
-                }
-                if (start < 0) throw new InvalidDataException("hittade inte posterna i filen");
-            }
 
             // Kolumnordning efter fältnummer om de är 0..nf-1, annars definitionsordning.
             var byIndex = new Field[nf];
@@ -138,60 +145,32 @@ namespace RapidTillCsv
             if (!indexOk) byIndex = fields.ToArray();
             foreach (var f in byIndex) t.Columns.Add(f.Name);
 
-            int pos = start;
-            while (pos < d.Length)
+            // En post: ett [u8 n, text] per fält. Tomma fält sist i posten
+            // utelämnas i nyare filer och blir tomma kolumner här.
+            for (int i = blocks.Count - count; i < blocks.Count; i++)
             {
-                int recLen = U16(d, pos);
-                int end = pos + recLen;
-                int q = pos + 2;
+                int q = blocks[i] + 2;
+                int end = blocks[i] + U16(d, blocks[i]);
                 var row = new string[nf];
                 for (int k = 0; k < nf; k++)
                 {
+                    if (q >= end) { row[k] = ""; continue; }
                     int l = d[q];
-                    row[k] = Cp850.Decode(d, q + 1, l).TrimEnd();
+                    row[k] = Cp850.Decode(d, q + 1, l).TrimEnd(null);
                     q += 1 + l;
                 }
                 t.Rows.Add(row);
-                pos = end;
             }
             return t;
         }
 
-        static bool LooksLikeRecords(byte[] d, int s, int nf, int count)
+        // Antal fält i blocket vid q om det ser ut som en post (högst nf fält
+        // som går jämnt ut mot blockets slut), annars -1.
+        static int FieldCount(byte[] d, int q, int nf)
         {
-            int q = s;
-            for (int r = 0; r < count; r++)
-            {
-                int n = RecordAt(d, q, nf);
-                if (n < 0) return false;
-                q += n;
-            }
-            return true;
-        }
-
-        // Antal poster från s till exakt filslut, eller -1.
-        static int CountToEnd(byte[] d, int s, int nf)
-        {
-            int q = s, count = 0;
-            while (q < d.Length)
-            {
-                int n = RecordAt(d, q, nf);
-                if (n < 0) return -1;
-                q += n;
-                count++;
-            }
-            return q == d.Length ? count : -1;
-        }
-
-        // Längden på en giltig post med nf fält vid q, eller -1.
-        static int RecordAt(byte[] d, int q, int nf)
-        {
-            if (q + 2 > d.Length) return -1;
-            int len = U16(d, q);
-            if (len < 2 + nf || q + len > d.Length) return -1;
-            int end = q + len, t = q + 2, c = 0;
+            int end = q + U16(d, q), t = q + 2, c = 0;
             while (t < end) { t += 1 + d[t]; c++; }
-            return (t == end && c == nf) ? len : -1;
+            return (t == end && c <= nf) ? c : -1;
         }
     }
 
@@ -251,7 +230,7 @@ namespace RapidTillCsv
                 int o = off + 1;
                 for (int i = 0; i < names.Count; i++)
                 {
-                    string v = Cp850.Decode(d, o, Math.Min(widths[i], off + recLen - o)).TrimEnd();
+                    string v = Cp850.Decode(d, o, Math.Min(widths[i], off + recLen - o)).TrimEnd(null);
                     row[i] = Format(types[i], v);
                     o += widths[i];
                 }
