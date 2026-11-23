@@ -1,0 +1,8 @@
+bin/
+obj/
+*.csv
+*.xlsx
+*.RPD
+*.DBF
+*.rpd
+*.dbf
