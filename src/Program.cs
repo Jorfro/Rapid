@@ -5,7 +5,9 @@
 // Användning:
 //   RapidTillCsv.exe                      alla .RPD/.DBF i aktuell mapp och undermappar
 //   RapidTillCsv.exe fil.RPD mapp ...     angivna filer/mappar (dra och släpp går bra)
+//   RapidTillCsv.exe E:\ --ut D:\Export   resultat i D:\Export med samma mappstruktur
 // Flaggor:
+//   --ut MAPP      skriv resultatet i MAPP i stället för bredvid källfilerna
 //   --komma        komma som avgränsare i CSV (standard är semikolon)
 //   --tab          tabb som avgränsare i CSV
 //   --ingen-xlsx   skriv bara CSV
@@ -43,7 +45,7 @@ namespace RapidTillCsv
 
     static class Cp850
     {
-        const string High =
+        public const string High =
             "ÇüéâäàåçêëèïîìÄÅ" +
             "ÉæÆôöòûùÿÖÜø£Ø×ƒ" +
             "áíóúñÑªº¿®¬½¼¡«»" +
@@ -53,14 +55,30 @@ namespace RapidTillCsv
             "ÓßÔÒõÕµþÞÚÛÙýÝ¯´" +
             "­±‗¾¶§÷¸°¨·¹³²■ ";
 
+        // Windows-1252, för DBF-filer vars filhuvud anger Windows-teckentabell.
+        public const string Win1252 =
+            "\u20AC?\u201A\u0192\u201E\u2026\u2020\u2021\u02C6\u2030\u0160\u2039\u0152?\u017D?" +
+            "?\u2018\u2019\u201C\u201D\u2022\u2013\u2014\u02DC\u2122\u0161\u203A\u0153?\u017E\u0178" +
+            "\u00A0\u00A1\u00A2\u00A3\u00A4\u00A5\u00A6\u00A7\u00A8\u00A9\u00AA\u00AB\u00AC\u00AD\u00AE\u00AF" +
+            "\u00B0\u00B1\u00B2\u00B3\u00B4\u00B5\u00B6\u00B7\u00B8\u00B9\u00BA\u00BB\u00BC\u00BD\u00BE\u00BF" +
+            "\u00C0\u00C1\u00C2\u00C3\u00C4\u00C5\u00C6\u00C7\u00C8\u00C9\u00CA\u00CB\u00CC\u00CD\u00CE\u00CF" +
+            "\u00D0\u00D1\u00D2\u00D3\u00D4\u00D5\u00D6\u00D7\u00D8\u00D9\u00DA\u00DB\u00DC\u00DD\u00DE\u00DF" +
+            "\u00E0\u00E1\u00E2\u00E3\u00E4\u00E5\u00E6\u00E7\u00E8\u00E9\u00EA\u00EB\u00EC\u00ED\u00EE\u00EF" +
+            "\u00F0\u00F1\u00F2\u00F3\u00F4\u00F5\u00F6\u00F7\u00F8\u00F9\u00FA\u00FB\u00FC\u00FD\u00FE\u00FF";
+
         // Avkodar och ersätter styrtecken (CR, LF, tabb m.fl.) med mellanslag.
         public static string Decode(byte[] d, int off, int len)
+        {
+            return Decode(d, off, len, High);
+        }
+
+        public static string Decode(byte[] d, int off, int len, string high)
         {
             var sb = new StringBuilder(len);
             for (int i = off; i < off + len; i++)
             {
                 byte b = d[i];
-                if (b >= 0x80) sb.Append(High[b - 0x80]);
+                if (b >= 0x80) sb.Append(high[b - 0x80]);
                 else if (b < 0x20 || b == 0x7F) sb.Append(' ');
                 else sb.Append((char)b);
             }
@@ -186,6 +204,12 @@ namespace RapidTillCsv
             if (headerLen < 33 || recLen < 1 || headerLen > d.Length)
                 throw new InvalidDataException("inte en dBase-fil (okänt filhuvud)");
 
+            // Byte 29 anger teckentabell. 0x03 och 0x57-0x59 är Windows (1252),
+            // allt annat behandlas som DOS 850 (Rapid och dBase under DOS).
+            int ldid = d[29];
+            bool windows = ldid == 0x03 || (ldid >= 0x57 && ldid <= 0x59);
+            string cp = windows ? Cp850.Win1252 : Cp850.High;
+
             var names = new List<string>();
             var types = new List<char>();
             var widths = new List<int>();
@@ -194,7 +218,7 @@ namespace RapidTillCsv
             {
                 int n = 0;
                 while (n < 11 && d[p + n] != 0) n++;
-                names.Add(Cp850.Decode(d, p, n).Trim());
+                names.Add(Cp850.Decode(d, p, n, cp).Trim());
                 types.Add((char)d[p + 11]);
                 widths.Add(d[p + 16]);
                 decs.Add(d[p + 17]);
@@ -216,6 +240,20 @@ namespace RapidTillCsv
 
             var t = new Table();
             t.Columns.AddRange(names);
+            if (windows) t.Warnings.Add("Windows-teckentabell (1252) enligt filhuvudet");
+            var memo = new List<string>();
+            var binary = new List<string>();
+            for (int i = 0; i < names.Count; i++)
+            {
+                if (types[i] == 'M') memo.Add(names[i]);
+                else if ("CNFDL".IndexOf(types[i]) < 0) binary.Add(names[i] + " (" + types[i] + ")");
+            }
+            if (memo.Count > 0)
+                t.Warnings.Add("memofält " + string.Join(", ", memo.ToArray()) +
+                               ": texten ligger i en separat .DBT/.FPT-fil och följer inte med");
+            if (binary.Count > 0)
+                t.Warnings.Add("fält som inte är text: " + string.Join(", ", binary.ToArray()) +
+                               ", värdena kan vara skräp");
             int deleted = 0;
             for (int r = 0; r < nrec; r++)
             {
@@ -230,7 +268,7 @@ namespace RapidTillCsv
                 int o = off + 1;
                 for (int i = 0; i < names.Count; i++)
                 {
-                    string v = Cp850.Decode(d, o, Math.Min(widths[i], off + recLen - o)).TrimEnd(null);
+                    string v = Cp850.Decode(d, o, Math.Min(widths[i], off + recLen - o), cp).TrimEnd(null);
                     row[i] = Format(types[i], v);
                     o += widths[i];
                 }
@@ -450,6 +488,12 @@ namespace RapidTillCsv
         }
     }
 
+    sealed class Job
+    {
+        public string File;     // källfil, full sökväg
+        public string Base;     // mappen som angavs (eller aktuell mapp); styr strukturen under --ut
+    }
+
     static class Program
     {
         [DllImport("kernel32.dll")]
@@ -463,9 +507,20 @@ namespace RapidTillCsv
             catch { return false; }
         }
 
+        static StreamWriter log;
+
+        // Skriver till både fönstret och loggfilen.
+        static void Say(string line)
+        {
+            Console.WriteLine(line);
+            if (log != null) log.WriteLine(line);
+        }
+
         static int Main(string[] args)
         {
-            int rc = Run(args);
+            int rc;
+            try { rc = Run(args); }
+            finally { if (log != null) { log.Dispose(); log = null; } }
             if (OwnsConsoleWindow())
             {
                 Console.WriteLine();
@@ -479,103 +534,190 @@ namespace RapidTillCsv
         {
             char sep = ';';
             bool xlsx = true;
+            string outRoot = null;
             var inputs = new List<string>();
-            foreach (string a in args)
+            for (int i = 0; i < args.Length; i++)
             {
+                string a = args[i];
                 string k = a.ToLowerInvariant();
                 if (k == "--komma") sep = ',';
                 else if (k == "--tab") sep = '\t';
                 else if (k == "--semikolon") sep = ';';
                 else if (k == "--ingen-xlsx") xlsx = false;
+                else if (k == "--ut")
+                {
+                    if (i + 1 >= args.Length) { Console.WriteLine("--ut behöver en mapp, t.ex. --ut D:\\Export"); return 2; }
+                    outRoot = args[++i];
+                }
+                else if (k.StartsWith("--ut=")) outRoot = a.Substring(5);
                 else if (k == "-h" || k == "--help" || k == "/?") { Usage(); return 0; }
                 else if (k.StartsWith("--")) { Console.WriteLine("Okänd flagga: " + a); Usage(); return 2; }
                 else inputs.Add(a);
             }
 
-            var files = new List<string>();
+            if (outRoot != null)
+            {
+                try
+                {
+                    outRoot = Path.GetFullPath(outRoot.Trim(new[] { '"' }));
+                    Directory.CreateDirectory(outRoot);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Kan inte skapa utmappen " + outRoot + ": " + ex.Message);
+                    return 2;
+                }
+            }
+
+            var jobs = new List<Job>();
+            var sources = new List<string>();
+            var skippedDirs = new List<string>();
             if (inputs.Count == 0)
             {
                 string dir = Directory.GetCurrentDirectory();
-                Console.WriteLine("Söker .RPD- och .DBF-filer i " + dir);
-                Collect(dir, files);
+                sources.Add(dir);
+                Collect(dir, dir, jobs, skippedDirs);
             }
             foreach (string inp in inputs)
             {
-                if (Directory.Exists(inp)) Collect(Path.GetFullPath(inp), files);
-                else if (File.Exists(inp)) files.Add(Path.GetFullPath(inp));
+                string full;
+                try { full = Path.GetFullPath(inp.Trim(new[] { '"' })); }
+                catch (Exception) { Console.WriteLine("Ogiltig sökväg: " + inp); continue; }
+                if (Directory.Exists(full)) { sources.Add(full); Collect(full, full, jobs, skippedDirs); }
+                else if (File.Exists(full)) { sources.Add(full); jobs.Add(new Job { File = full, Base = Path.GetDirectoryName(full) }); }
                 else Console.WriteLine("Hittar inte: " + inp);
             }
-            files.Sort(StringComparer.OrdinalIgnoreCase);
-            for (int i = files.Count - 1; i > 0; i--)
-                if (string.Equals(files[i], files[i - 1], StringComparison.OrdinalIgnoreCase)) files.RemoveAt(i);
-            if (files.Count == 0)
+            jobs.Sort((x, y) => StringComparer.OrdinalIgnoreCase.Compare(x.File, y.File));
+            for (int i = jobs.Count - 1; i > 0; i--)
+                if (string.Equals(jobs[i].File, jobs[i - 1].File, StringComparison.OrdinalIgnoreCase)) jobs.RemoveAt(i);
+
+            // Loggfil: i utmappen, annars i den första angivna mappen (eller aktuell mapp).
+            string logDir = outRoot;
+            if (logDir == null && sources.Count > 0)
+                logDir = Directory.Exists(sources[0]) ? sources[0] : Path.GetDirectoryName(sources[0]);
+            string logPath = null;
+            if (logDir != null)
             {
-                Console.WriteLine("Inga .RPD- eller .DBF-filer att konvertera.");
+                logPath = Path.Combine(logDir, "RapidTillCsv_logg_" +
+                    DateTime.Now.ToString("yyyy-MM-dd_HHmmss", CultureInfo.InvariantCulture) + ".txt");
+                try { log = new StreamWriter(logPath, false, new UTF8Encoding(true)); log.NewLine = "\r\n"; }
+                catch (Exception ex) { Console.WriteLine("Kunde inte skapa loggfil (" + ex.Message + "), fortsätter utan."); logPath = null; }
+            }
+
+            Say("RapidTillCsv " + DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+            foreach (string src in sources) Say("Källa:  " + src);
+            Say("Utdata: " + (outRoot ?? "bredvid källfilerna"));
+            Say(jobs.Count + " fil(er) att konvertera");
+            Say("");
+
+            if (jobs.Count == 0)
+            {
+                Say("Inga .RPD- eller .DBF-filer att konvertera.");
                 return 1;
             }
 
-            int ok = 0, failed = 0;
-            foreach (string f in files)
+            var used = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            var failedFiles = new List<string>();
+            int ok = 0, warned = 0;
+            foreach (Job job in jobs)
             {
-                string ext = Path.GetExtension(f).ToUpperInvariant();
-                string dir = Path.GetDirectoryName(f);
+                string f = job.File;
+                bool dbf = Path.GetExtension(f).ToUpperInvariant() == ".DBF";
+                string srcDir = Path.GetDirectoryName(f);
                 string stem = Path.GetFileNameWithoutExtension(f);
-                string outStem = ext == ".DBF" ? stem + "_dbf" : stem;
                 try
                 {
-                    Table t = ext == ".DBF" ? DbfReader.Read(f) : RpdReader.Read(f);
-                    string csv = Path.Combine(dir, outStem + ".csv");
-                    CsvWriter.Write(t, csv, sep);
-                    string made = Path.GetFileName(csv);
-                    if (xlsx)
-                    {
-                        string x = Path.Combine(dir, outStem + ".xlsx");
-                        XlsxWriter.Write(t, x, XlsxWriter.SheetName(stem));
-                        made += " + " + Path.GetFileName(x);
-                    }
-                    Console.WriteLine("OK   " + Path.GetFileName(f) + " -> " + made +
-                                      "  (" + t.Rows.Count + " poster, " + t.Columns.Count + " fält)");
-                    foreach (string w in t.Warnings) Console.WriteLine("     obs: " + w);
+                    Table t = dbf ? DbfReader.Read(f) : RpdReader.Read(f);
+
+                    string outDir = outRoot == null ? srcDir : Path.Combine(outRoot, RelativeDir(job.Base, srcDir));
+                    Directory.CreateDirectory(outDir);
+                    string wanted = Path.Combine(outDir, stem + (dbf ? "_dbf" : ""));
+                    string outStem = wanted;
+                    for (int n = 2; used.ContainsKey(outStem); n++) outStem = wanted + "_" + n;
+                    used[outStem] = true;
+                    if (outStem != wanted)
+                        t.Warnings.Add("namnet var redan använt i den här körningen, sparad som " + Path.GetFileName(outStem));
+
+                    CsvWriter.Write(t, outStem + ".csv", sep);
+                    if (xlsx) XlsxWriter.Write(t, outStem + ".xlsx", XlsxWriter.SheetName(stem));
+
+                    Say("OK   " + f + " -> " + outStem + ".csv" + (xlsx ? " + .xlsx" : "") +
+                        "  (" + t.Rows.Count + " poster, " + t.Columns.Count + " fält)");
+                    foreach (string w in t.Warnings) Say("     obs: " + w);
+                    if (t.Warnings.Count > 0) warned++;
                     ok++;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("FEL  " + Path.GetFileName(f) + ": " + ex.Message);
-                    failed++;
+                    Say("FEL  " + f + ": " + ex.Message);
+                    failedFiles.Add(f);
                 }
             }
-            Console.WriteLine();
-            Console.WriteLine(ok + " fil(er) konverterade" + (failed > 0 ? ", " + failed + " misslyckades." : "."));
-            return failed > 0 ? 1 : 0;
+
+            Say("");
+            Say("Klart: " + ok + " OK, " + failedFiles.Count + " FEL" +
+                (warned > 0 ? ", " + warned + " av de OK med anmärkning (obs)" : "") + ".");
+            if (failedFiles.Count > 0)
+            {
+                Say("");
+                Say("Filer med FEL:");
+                foreach (string f in failedFiles) Say("  " + f);
+            }
+            if (skippedDirs.Count > 0)
+            {
+                Say("");
+                Say("Mappar som inte gick att läsa:");
+                foreach (string d in skippedDirs) Say("  " + d);
+            }
+            if (logPath != null) Console.WriteLine("Logg: " + logPath);
+            return failedFiles.Count > 0 ? 1 : 0;
         }
 
-        static void Collect(string dir, List<string> files)
+        // Undermappens sökväg relativt den angivna mappen ("" om samma).
+        static string RelativeDir(string baseDir, string dir)
+        {
+            string b = baseDir.TrimEnd('\\', '/');
+            string d = dir.TrimEnd('\\', '/');
+            if (string.Equals(d, b, StringComparison.OrdinalIgnoreCase)) return "";
+            string prefix = b + Path.DirectorySeparatorChar;
+            return d.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? d.Substring(prefix.Length) : "";
+        }
+
+        static void Collect(string dir, string baseDir, List<Job> jobs, List<string> skipped)
         {
             try
             {
                 foreach (string f in Directory.GetFiles(dir))
                 {
                     string e = Path.GetExtension(f).ToUpperInvariant();
-                    if (e == ".RPD" || e == ".DBF") files.Add(f);
+                    if (e == ".RPD" || e == ".DBF") jobs.Add(new Job { File = f, Base = baseDir });
                 }
-                foreach (string sub in Directory.GetDirectories(dir)) Collect(sub, files);
+                foreach (string sub in Directory.GetDirectories(dir))
+                {
+                    // Följ inte kopplingar/länkar, de kan leda runt i cirklar.
+                    if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue;
+                    Collect(sub, baseDir, jobs, skipped);
+                }
             }
-            catch (UnauthorizedAccessException) { }
-            catch (IOException) { }
+            catch (UnauthorizedAccessException) { skipped.Add(dir); }
+            catch (IOException) { skipped.Add(dir); }
         }
 
         static void Usage()
         {
             Console.WriteLine("RapidTillCsv - konverterar RapidFile (.RPD) och dBase (.DBF) till CSV och Excel");
             Console.WriteLine();
-            Console.WriteLine("  RapidTillCsv.exe                 alla .RPD/.DBF i aktuell mapp och undermappar");
-            Console.WriteLine("  RapidTillCsv.exe fil.RPD mapp    angivna filer/mappar (dra och släpp går bra)");
+            Console.WriteLine("  RapidTillCsv.exe                    alla .RPD/.DBF i aktuell mapp och undermappar");
+            Console.WriteLine("  RapidTillCsv.exe fil.RPD mapp       angivna filer/mappar (dra och släpp går bra)");
+            Console.WriteLine("  RapidTillCsv.exe E:\\ --ut D:\\Export  allt på E:, resultat i D:\\Export med samma mappar");
             Console.WriteLine();
+            Console.WriteLine("  --ut MAPP     skriv resultatet i MAPP i stället för bredvid källfilerna");
             Console.WriteLine("  --komma       komma som avgränsare (standard: semikolon, som svensk Excel vill ha)");
             Console.WriteLine("  --tab         tabb som avgränsare");
             Console.WriteLine("  --ingen-xlsx  skriv bara CSV");
             Console.WriteLine();
             Console.WriteLine("NAMN.RPD ger NAMN.csv och NAMN.xlsx, NAMN.DBF ger NAMN_dbf.csv och NAMN_dbf.xlsx.");
+            Console.WriteLine("En loggfil (RapidTillCsv_logg_<datum>.txt) skrivs i utmappen eller i källmappen.");
         }
     }
 }

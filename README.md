@@ -7,19 +7,31 @@ Konverterar Ashton-Tates **RapidFile** (`.RPD`, DOS, ca 1986–1990) och **dBase
 - **Dubbelklicka** på `RapidTillCsv.exe` så konverteras alla `.RPD`/`.DBF` i mappen den startas i, inklusive undermappar.
 - **Dra och släpp** en eller flera filer eller mappar på exe-filen.
 - **Kommandorad:** `RapidTillCsv.exe P:\Rapid\Filer\TOMPOWSK.RPD`
+- **Hel disk utan att röra originalen:** `RapidTillCsv.exe E:\ --ut D:\Export`
 
 | Flagga | Betydelse |
 |---|---|
+| `--ut MAPP` | skriv resultatet i MAPP, med samma undermappar som i källan, i stället för bredvid källfilerna |
 | `--komma` | komma som avgränsare i CSV (standard är semikolon, som svensk Excel vill ha) |
 | `--tab` | tabb som avgränsare |
 | `--ingen-xlsx` | skriv bara CSV |
 
-Resultatet hamnar bredvid källfilen:
+Utfilerna får samma namn som källfilen:
 
 - `NAMN.RPD` → `NAMN.csv` + `NAMN.xlsx`
 - `NAMN.DBF` → `NAMN_dbf.csv` + `NAMN_dbf.xlsx`
 
-Befintliga utfiler skrivs över. Källfilerna ändras aldrig.
+Utan `--ut` hamnar de bredvid källfilen, och en befintlig `NAMN.csv`/`NAMN.xlsx` där skrivs över. Källfilerna ändras aldrig. Om två källfiler i samma körning skulle ge samma utfil (t.ex. två mappar med `TOMPOWSK.RPD` och samma `--ut`) får den andra suffixet `_2`.
+
+### Loggfil
+
+Varje körning skriver `RapidTillCsv_logg_<datum>_<tid>.txt` i utmappen, eller i källmappen om `--ut` saknas. Den listar varje fil med `OK` eller `FEL` och eventuella anmärkningar (`obs`). Sist kommer en sammanfattning med alla filer som gav FEL och alla mappar som inte gick att läsa.
+
+En fil med fel stoppar inte körningen. Anmärkningar för DBF-filer:
+
+- **Windows-teckentabell:** filhuvudet anger Windows (1252), och filen avkodas därefter.
+- **Memofält:** texten ligger i en separat `.DBT`- eller `.FPT`-fil och följer inte med.
+- **Fält som inte är text:** binära FoxPro-fält som `I`, `Y` och `T` kan bli skräp.
 
 ### CSV eller XLSX?
 
